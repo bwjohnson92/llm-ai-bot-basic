@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from prompts import system_prompt
-from functions.call_function import available_functions
+from functions.call_function import available_functions, call_function
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -24,27 +24,66 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     args = parser.parse_args()
     # Now we can access `args.user_prompt`
+    messages = [types.Content(role="user", parts=[types.Part(text=args.user_prompt)])]
 
-    response = generate_response(client, args.user_prompt)
+    for _ in range(5):
+        response = generate_content(client, messages)
+        new_messages = check_candidate_property(response)
+        messages.extend(new_messages)
 
-    print_info(args, response)
+        print_info(args, response)
+        parsed = parse_response(response, args.verbose)
+        if parsed is None:
+            break
+        messages.append(types.Content(role="user", parts=parsed))
+    if _ == 4: #Only get 5 prompts a minute on the free Gemini tier
+        print("Reached maximum number of iterations.")
+        exit(1)
 
-    parse_response(response)
+def check_candidate_property(response):
+    if response.candidates is None:
+        raise RuntimeError("Response is missing candidates.")
+        return
+    new_messages = []
+    for candidate in response.candidates:
+        if candidate.content is None:
+            raise RuntimeError("Candidate is missing content.")
+            continue
+        new_messages.append(candidate.content)
+    return new_messages
 
-def parse_response(response):
+def parse_response(response, verbose):
     if response.function_calls:
-        for function_call in response.function_calls:
-            print(f"Calling function: {function_call.name}({function_call.args})")
+        return call_local_function(response, verbose)
     else:
         print_response(response)
+        return None
+
+def call_local_function(response, verbose):
+    results = []
+    for function_call in response.function_calls:
+        function_call_result = call_function(function_call, verbose)
+        if function_call_result.parts is None:
+            raise RuntimeError("Function call result is missing parts.")
+            continue
+        if function_call_result.parts[0].function_response is None:
+            raise RuntimeError("Function call result is missing function response.")
+            continue
+        if function_call_result.parts[0].function_response.response is None:
+            raise RuntimeError("Function call result is missing function response content.")
+            continue
+
+        results.append(function_call_result.parts[0])
+        if verbose:
+            print(f"-> {function_call_result.parts[0].function_response.response}")
+    return results
 
 def print_info(args, response):
     if args.verbose:
         print_prompt(args.user_prompt)
         print_token_usage(response)
 
-def generate_response(client, user_prompt):
-    messages = [types.Content(role="user", parts=[types.Part(text=user_prompt)])]
+def generate_content(client, messages):
     config = types.GenerateContentConfig(
         system_instruction=system_prompt, 
         temperature=0,
